@@ -26,7 +26,7 @@ returns:
     stop() -> disconnects all listeners and stops finder
 --]]
 local IF={}
-IF.version="2.2.2"
+IF.version="1.2.2"
 
 local W=workspace
 
