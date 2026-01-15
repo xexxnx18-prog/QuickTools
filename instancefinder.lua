@@ -73,7 +73,7 @@ end
 
 local function Pass(o: Instance, opt, root: Instance): boolean
     if opt.Scope == "Workspace" and not o:IsDescendantOf(WorkspaceRoot) then return false end
-    if opt.Root and not o:IsDescendantOf(root) and o ~= root then return false end
+    if opt.Root and o ~= root and not o:IsDescendantOf(root) then return false end
     if opt.MaxDepth and Depth(o, root) > opt.MaxDepth then return false end
     if opt.Classes and not opt.Classes[o.ClassName] then return false end
     if opt.Names and not opt.Names[o.Name] then return false end
@@ -101,46 +101,49 @@ local function Watch(
     local alive = true
     local cons = {}
 
-    Fire(cb, opt.EventMask, "Init", Describe(o))
+    Fire(cb, opt.EventMask, "init", Describe(o))
 
     if replicatesignal then
         local s = replicatesignal(o)
         if opt.Once and opt.Once.Replicate ~= false then
             cons[#cons+1] = s:Once(function()
-                if alive and run[1] then Fire(cb, opt.EventMask, "Replicate", Describe(o)) end
+                if alive and run[1] then
+                    Fire(cb, opt.EventMask, "replicate", Describe(o))
+                end
             end)
         else
             cons[#cons+1] = s:Connect(function()
-                if alive and run[1] then Fire(cb, opt.EventMask, "Replicate", Describe(o)) end
+                if alive and run[1] then
+                    Fire(cb, opt.EventMask, "replicate", Describe(o))
+                end
             end)
         end
     end
 
     cons[#cons+1] = o.AncestryChanged:Connect(function()
-        if alive and run[1] then Fire(cb, opt.EventMask, "Ancestry", Describe(o)) end
-    end)
-
-    cons[#cons+1] = o:GetPropertyChangedSignal("Parent"):Connect(function()
-        if alive and run[1] then Fire(cb, opt.EventMask, "Parent", Describe(o)) end
-    end)
-
-    cons[#cons+1] = o.ChildAdded:Connect(function(c: Instance)
-        if alive and run[1] then Fire(cb, opt.EventMask, "Child", Describe(o), c) end
-        task.defer(Watch, c, cb, bag, seen, run, opt, root)
-    end)
-
-    cons[#cons+1] = o.DescendantRemoving:Connect(function(d: Instance)
-        if d == o and alive and run[1] then
-            Fire(cb, opt.EventMask, "Destroy", Describe(o))
+        if alive and run[1] then
+            Fire(cb, opt.EventMask, "ancestry", Describe(o))
         end
     end)
 
+    cons[#cons+1] = o:GetPropertyChangedSignal("Parent"):Connect(function()
+        if alive and run[1] then
+            Fire(cb, opt.EventMask, "parent", Describe(o))
+        end
+    end)
+
+    cons[#cons+1] = o.ChildAdded:Connect(function(c: Instance)
+        if alive and run[1] then
+            Fire(cb, opt.EventMask, "child", Describe(o), c)
+        end
+        task.defer(Watch, c, cb, bag, seen, run, opt, root)
+    end)
+
     if o.GetAttributes then
-        local attrs = o:GetAttributes()
-        for k in pairs(attrs) do
+        for k in pairs(o:GetAttributes()) do
             cons[#cons+1] = o:GetAttributeChangedSignal(k):Connect(function()
                 if alive and run[1] then
-                    Fire(cb, opt.EventMask, "Attr", Describe(o), k, o:GetAttribute(k))
+                    Fire(cb, opt.EventMask, "attr", Describe(o), k, o:GetAttribute(k))
                 end
             end)
         end
@@ -149,7 +152,9 @@ local function Watch(
     o.Destroying:Once(function()
         if not alive then return end
         alive = false
-        if run[1] then Fire(cb, opt.EventMask, "Destroy", Describe(o)) end
+        if run[1] then
+            Fire(cb, opt.EventMask, "destroy", Describe(o))
+        end
         for _,c in cons do c:Disconnect() end
         bag[o] = nil
         seen[o] = nil
