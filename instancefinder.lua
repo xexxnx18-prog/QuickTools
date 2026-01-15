@@ -1,52 +1,8 @@
---[[
-IF.Start(callback [, options])
-
-Tracks client-visible Instances in real time.
-Does not rely on names or paths.
-
-callback(ev, data, a, val)
-
-Events:
-    "init"        instance picked up
-    "replicate"   instance becomes available
-    "ancestry"    ancestry changed
-    "parent"      Parent changed
-    "child"       child added
-    "attr"        attribute changed
-    "destroy"     instance destroyed
-
-data:
-    instance      Instance reference
-    class         ClassName
-    name          Name
-    parent        Parent
-    attributes    attributes table or nil
-
-Extra values:
-    ev == "child" -> a = child Instance
-    ev == "attr"  -> a = attribute name, val = new value
-
-options (optional):
-    Scope      "Workspace" or "All"
-    Classes    { [ClassName] = true }
-    Names      { [Name] = true }
-    MaxDepth   number
-    Throttle   number
-    Once = {
-        Replicate = true
-    }
-
-returns:
-    controller:
-        Stop()
-        Pause()
-        Resume()
---]]
 --!strict
 --!native
 
 local IF = {}
-IF.Version = "1.2.2 BETA"
+IF.Version = "1.2.0 BETA"
 
 local task = task
 local WorkspaceRoot: Workspace = workspace
@@ -98,35 +54,9 @@ local function Watch(
     seen[o] = true
 
     local alive = true
-    local replicated = false
     local cons = {}
 
     Fire(cb, opt.EventMask, "init", Describe(o))
-
-    if replicatesignal then
-        local sig = replicatesignal(o)
-        cons[#cons+1] =
-            (opt.Once and opt.Once.Replicate ~= false)
-            and sig:Once(function()
-                if alive and run[1] and not replicated then
-                    replicated = true
-                    Fire(cb, opt.EventMask, "replicate", Describe(o))
-                end
-            end)
-            or sig:Connect(function()
-                if alive and run[1] and not replicated then
-                    replicated = true
-                    Fire(cb, opt.EventMask, "replicate", Describe(o))
-                end
-            end)
-    else
-        cons[#cons+1] = o.AncestryChanged:Connect(function()
-            if alive and run[1] and not replicated and o.Parent then
-                replicated = true
-                Fire(cb, opt.EventMask, "replicate", Describe(o))
-            end
-        end)
-    end
 
     cons[#cons+1] = o.AncestryChanged:Connect(function()
         if alive and run[1] then
