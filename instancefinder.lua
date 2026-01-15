@@ -46,7 +46,7 @@ returns:
 --!native
 
 local IF = {}
-IF.Version = "1.1.0 BETA"
+IF.Version = "1.2.2 BETA"
 
 local task = task
 local WorkspaceRoot: Workspace = workspace
@@ -82,8 +82,7 @@ end
 
 local function Fire(cb, mask, ev, ...)
     if mask and not mask[ev] then return end
-    local ok, err = pcall(cb, ev, ...)
-    if not ok then warn(err) end
+    pcall(cb, ev, ...)
 end
 
 local function Watch(
@@ -99,25 +98,34 @@ local function Watch(
     seen[o] = true
 
     local alive = true
+    local replicated = false
     local cons = {}
 
     Fire(cb, opt.EventMask, "init", Describe(o))
 
     if replicatesignal then
-        local s = replicatesignal(o)
-        if opt.Once and opt.Once.Replicate ~= false then
-            cons[#cons+1] = s:Once(function()
-                if alive and run[1] then
+        local sig = replicatesignal(o)
+        cons[#cons+1] =
+            (opt.Once and opt.Once.Replicate ~= false)
+            and sig:Once(function()
+                if alive and run[1] and not replicated then
+                    replicated = true
                     Fire(cb, opt.EventMask, "replicate", Describe(o))
                 end
             end)
-        else
-            cons[#cons+1] = s:Connect(function()
-                if alive and run[1] then
+            or sig:Connect(function()
+                if alive and run[1] and not replicated then
+                    replicated = true
                     Fire(cb, opt.EventMask, "replicate", Describe(o))
                 end
             end)
-        end
+    else
+        cons[#cons+1] = o.AncestryChanged:Connect(function()
+            if alive and run[1] and not replicated and o.Parent then
+                replicated = true
+                Fire(cb, opt.EventMask, "replicate", Describe(o))
+            end
+        end)
     end
 
     cons[#cons+1] = o.AncestryChanged:Connect(function()
@@ -140,13 +148,25 @@ local function Watch(
     end)
 
     if o.GetAttributes then
+        local hooked = {}
         for k in pairs(o:GetAttributes()) do
+            hooked[k] = true
             cons[#cons+1] = o:GetAttributeChangedSignal(k):Connect(function()
                 if alive and run[1] then
                     Fire(cb, opt.EventMask, "attr", Describe(o), k, o:GetAttribute(k))
                 end
             end)
         end
+        cons[#cons+1] = o.AttributeChanged:Connect(function(k)
+            if not hooked[k] then
+                hooked[k] = true
+                cons[#cons+1] = o:GetAttributeChangedSignal(k):Connect(function()
+                    if alive and run[1] then
+                        Fire(cb, opt.EventMask, "attr", Describe(o), k, o:GetAttribute(k))
+                    end
+                end)
+            end
+        end)
     end
 
     o.Destroying:Once(function()
@@ -171,12 +191,15 @@ function IF.Start(cb, opt)
     local seen = setmetatable({}, { __mode = "k" })
     local run = { true }
 
+    task.defer(Watch, root, cb, bag, seen, run, opt, root)
+
     for _,v in root:GetDescendants() do
         if opt.Throttle then task.wait(opt.Throttle) end
         task.defer(Watch, v, cb, bag, seen, run, opt, root)
     end
 
     local added = root.DescendantAdded:Connect(function(v: Instance)
+        if not run[1] then return end
         if opt.Throttle then task.wait(opt.Throttle) end
         task.defer(Watch, v, cb, bag, seen, run, opt, root)
     end)
@@ -197,11 +220,6 @@ function IF.Start(cb, opt)
         end,
         Resume = function()
             run[1] = true
-            if opt.RescanOnResume then
-                for _,v in root:GetDescendants() do
-                    task.defer(Watch, v, cb, bag, seen, run, opt, root)
-                end
-            end
         end
     }
 end
