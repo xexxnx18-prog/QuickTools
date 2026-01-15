@@ -1,5 +1,5 @@
 --[[
-InstanceFinder.Start(callback [, options])
+IF.Start(callback [, options])
 
 Tracks client-visible Instances in real time.
 Does not rely on names or paths.
