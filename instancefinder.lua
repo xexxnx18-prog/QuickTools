@@ -2,7 +2,7 @@
 --!native
 
 local IF = {}
-IF.Version = "1.2.0 BETA"
+IF.Version = "1.2.1 BETA"
 
 local task = task
 local WorkspaceRoot: Workspace = workspace
@@ -36,43 +36,38 @@ local function Pass(o: Instance, opt, root: Instance): boolean
     return true
 end
 
-local function Fire(cb, mask, ev, ...)
+local function Fire(cb, mask, ev, payload)
     if mask and not mask[ev] then return end
-    pcall(cb, ev, ...)
+    pcall(cb, ev, payload)
 end
 
-local function Watch(
-    o: Instance,
-    cb,
-    bag,
-    seen,
-    run,
-    opt,
-    root: Instance
-)
+local function Watch(o: Instance, cb, bag, seen, run, opt, root: Instance)
     if not run[1] or seen[o] or not Pass(o, opt, root) then return end
     seen[o] = true
 
     local alive = true
     local cons = {}
 
-    Fire(cb, opt.EventMask, "init", Describe(o))
+    Fire(cb, opt.EventMask, "init", { self = Describe(o) })
 
     cons[#cons+1] = o.AncestryChanged:Connect(function()
         if alive and run[1] then
-            Fire(cb, opt.EventMask, "ancestry", Describe(o))
+            Fire(cb, opt.EventMask, "ancestry", { self = Describe(o) })
         end
     end)
 
     cons[#cons+1] = o:GetPropertyChangedSignal("Parent"):Connect(function()
         if alive and run[1] then
-            Fire(cb, opt.EventMask, "parent", Describe(o))
+            Fire(cb, opt.EventMask, "parent", { self = Describe(o) })
         end
     end)
 
     cons[#cons+1] = o.ChildAdded:Connect(function(c: Instance)
         if alive and run[1] then
-            Fire(cb, opt.EventMask, "child", Describe(o), c)
+            Fire(cb, opt.EventMask, "child", {
+                self = Describe(o),
+                child = Describe(c)
+            })
         end
         task.defer(Watch, c, cb, bag, seen, run, opt, root)
     end)
@@ -83,7 +78,11 @@ local function Watch(
             hooked[k] = true
             cons[#cons+1] = o:GetAttributeChangedSignal(k):Connect(function()
                 if alive and run[1] then
-                    Fire(cb, opt.EventMask, "attr", Describe(o), k, o:GetAttribute(k))
+                    Fire(cb, opt.EventMask, "attr", {
+                        self = Describe(o),
+                        key = k,
+                        value = o:GetAttribute(k)
+                    })
                 end
             end)
         end
@@ -92,7 +91,11 @@ local function Watch(
                 hooked[k] = true
                 cons[#cons+1] = o:GetAttributeChangedSignal(k):Connect(function()
                     if alive and run[1] then
-                        Fire(cb, opt.EventMask, "attr", Describe(o), k, o:GetAttribute(k))
+                        Fire(cb, opt.EventMask, "attr", {
+                            self = Describe(o),
+                            key = k,
+                            value = o:GetAttribute(k)
+                        })
                     end
                 end)
             end
@@ -103,7 +106,7 @@ local function Watch(
         if not alive then return end
         alive = false
         if run[1] then
-            Fire(cb, opt.EventMask, "destroy", Describe(o))
+            Fire(cb, opt.EventMask, "destroy", { self = Describe(o) })
         end
         for _,c in cons do c:Disconnect() end
         bag[o] = nil
