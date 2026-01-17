@@ -2,7 +2,7 @@
 --!native
 
 local IF = {}
-IF.Version = "1.2.5 DEV"
+IF.Version = "1.2.5.3 DEV"
 
 local task = task
 local WorkspaceRoot: Workspace = workspace
@@ -13,6 +13,7 @@ local setfenv = setfenv
 local pcall = pcall
 local rawget = rawget
 local getmetatable = getmetatable
+local typeof = typeof
 
 local function Describe(o: Instance)
     return {
@@ -34,26 +35,30 @@ local function Depth(o: Instance, root: Instance): number
     return d
 end
 
-local function AD(o: Instance) -- decrypter is kinda ass 
+local function AD(o: Instance)
     local ok, env = pcall(function()
         return getsenv and getsenv(o)
     end)
-    if ok and type(env) == "table" then
-        local m = getmetatable(env)
-        if m and rawget(m, "__index") then
-            m.__index = rawget(m, "__index")
+
+    if ok and typeof(env) == "table" then
+        local mt = getmetatable(env)
+        if typeof(mt) == "table" then
+            local idx = rawget(mt, "__index")
+            if idx ~= nil then
+                mt.__index = idx
+            end
         end
         if setfenv then
             pcall(setfenv, 0, env)
         end
         return true
     end
+
     if getscriptbytecode then
-        pcall(function()
-            getscriptbytecode(o)
-        end)
+        pcall(getscriptbytecode, o)
         return true
     end
+
     return false
 end
 
@@ -73,7 +78,7 @@ local function Fire(cb, mask, ev, payload)
 end
 
 local function Watch(o: Instance, cb, bag, seen, run, opt, root: Instance)
-    if not run[1] or seen[o] or not Pass(o, opt, root) then return end
+    if seen[o] or not Pass(o, opt, root) then return end
     seen[o] = true
 
     if opt.AD and (o:IsA("ModuleScript") or o:IsA("LocalScript")) then
@@ -111,7 +116,11 @@ local function Watch(o: Instance, cb, bag, seen, run, opt, root: Instance)
             hooked[k] = true
             cons[#cons+1] = o:GetAttributeChangedSignal(k):Connect(function()
                 if alive and run[1] then
-                    Fire(cb, opt.EventMask, "attr", { self = Describe(o), key = k, value = o:GetAttribute(k) })
+                    Fire(cb, opt.EventMask, "attr", {
+                        self = Describe(o),
+                        key = k,
+                        value = o:GetAttribute(k)
+                    })
                 end
             end)
         end
@@ -122,9 +131,7 @@ local function Watch(o: Instance, cb, bag, seen, run, opt, root: Instance)
     o.Destroying:Once(function()
         if not alive then return end
         alive = false
-        if run[1] then
-            Fire(cb, opt.EventMask, "destroy", { self = Describe(o) })
-        end
+        Fire(cb, opt.EventMask, "destroy", { self = Describe(o) })
         for _,c in cons do c:Disconnect() end
         bag[o] = nil
         seen[o] = nil
@@ -135,22 +142,26 @@ end
 
 function IF.Start(cb, opt)
     opt = opt or {}
-    opt.EventMask = opt.EventMask or { init=true, ancestry=true, parent=true, child=true, attr=true, destroy=true }
-    local root: Instance = opt.Root or WorkspaceRoot
+    opt.EventMask = opt.EventMask or {
+        init=true, ancestry=true, parent=true, child=true, attr=true, destroy=true
+    }
 
+    local root: Instance = opt.Root or WorkspaceRoot
     local bag = {}
     local seen = setmetatable({}, { __mode = "k" })
     local run = { true }
 
-    task.defer(Watch, root, cb, bag, seen, run, opt, root)
-
-    for _,v in root:GetDescendants() do
-        if opt.Throttle then task.wait(opt.Throttle) end
-        task.defer(Watch, v, cb, bag, seen, run, opt, root)
+    local function Rescan()
+        task.defer(Watch, root, cb, bag, seen, run, opt, root)
+        for _,v in root:GetDescendants() do
+            if opt.Throttle then task.wait(opt.Throttle) end
+            task.defer(Watch, v, cb, bag, seen, run, opt, root)
+        end
     end
 
+    Rescan()
+
     local added = root.DescendantAdded:Connect(function(v: Instance)
-        if not run[1] then return end
         if opt.Throttle then task.wait(opt.Throttle) end
         task.defer(Watch, v, cb, bag, seen, run, opt, root)
     end)
@@ -166,8 +177,14 @@ function IF.Start(cb, opt)
             table.clear(bag)
             table.clear(seen)
         end,
-        Pause = function() run[1] = false end,
-        Resume = function() run[1] = true end
+        Pause = function()
+            run[1] = false
+        end,
+        Resume = function()
+            if run[1] then return end
+            run[1] = true
+            Rescan()
+        end
     }
 end
 
