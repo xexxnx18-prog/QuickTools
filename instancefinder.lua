@@ -2,10 +2,17 @@
 --!native
 
 local IF = {}
-IF.Version = "1.2.1 BETA"
+IF.Version = "1.2.5 DEV"
 
 local task = task
 local WorkspaceRoot: Workspace = workspace
+
+local getsenv = getsenv
+local getscriptbytecode = getscriptbytecode
+local setfenv = setfenv
+local pcall = pcall
+local rawget = rawget
+local getmetatable = getmetatable
 
 local function Describe(o: Instance)
     return {
@@ -27,7 +34,31 @@ local function Depth(o: Instance, root: Instance): number
     return d
 end
 
+local function AD(o: Instance) -- decrypter is kinda ass 
+    local ok, env = pcall(function()
+        return getsenv and getsenv(o)
+    end)
+    if ok and type(env) == "table" then
+        local m = getmetatable(env)
+        if m and rawget(m, "__index") then
+            m.__index = rawget(m, "__index")
+        end
+        if setfenv then
+            pcall(setfenv, 0, env)
+        end
+        return true
+    end
+    if getscriptbytecode then
+        pcall(function()
+            getscriptbytecode(o)
+        end)
+        return true
+    end
+    return false
+end
+
 local function Pass(o: Instance, opt, root: Instance): boolean
+    if opt.Ignore and opt.Ignore[o] then return false end
     if opt.Scope == "Workspace" and not o:IsDescendantOf(WorkspaceRoot) then return false end
     if opt.Root and o ~= root and not o:IsDescendantOf(root) then return false end
     if opt.MaxDepth and Depth(o, root) > opt.MaxDepth then return false end
@@ -44,6 +75,10 @@ end
 local function Watch(o: Instance, cb, bag, seen, run, opt, root: Instance)
     if not run[1] or seen[o] or not Pass(o, opt, root) then return end
     seen[o] = true
+
+    if opt.AD and (o:IsA("ModuleScript") or o:IsA("LocalScript")) then
+        AD(o)
+    end
 
     local alive = true
     local cons = {}
@@ -64,42 +99,24 @@ local function Watch(o: Instance, cb, bag, seen, run, opt, root: Instance)
 
     cons[#cons+1] = o.ChildAdded:Connect(function(c: Instance)
         if alive and run[1] then
-            Fire(cb, opt.EventMask, "child", {
-                self = Describe(o),
-                child = Describe(c)
-            })
+            Fire(cb, opt.EventMask, "child", { self = Describe(o), child = Describe(c) })
         end
         task.defer(Watch, c, cb, bag, seen, run, opt, root)
     end)
 
     if o.GetAttributes then
         local hooked = {}
-        for k in pairs(o:GetAttributes()) do
+        local function hook(k)
+            if hooked[k] then return end
             hooked[k] = true
             cons[#cons+1] = o:GetAttributeChangedSignal(k):Connect(function()
                 if alive and run[1] then
-                    Fire(cb, opt.EventMask, "attr", {
-                        self = Describe(o),
-                        key = k,
-                        value = o:GetAttribute(k)
-                    })
+                    Fire(cb, opt.EventMask, "attr", { self = Describe(o), key = k, value = o:GetAttribute(k) })
                 end
             end)
         end
-        cons[#cons+1] = o.AttributeChanged:Connect(function(k)
-            if not hooked[k] then
-                hooked[k] = true
-                cons[#cons+1] = o:GetAttributeChangedSignal(k):Connect(function()
-                    if alive and run[1] then
-                        Fire(cb, opt.EventMask, "attr", {
-                            self = Describe(o),
-                            key = k,
-                            value = o:GetAttribute(k)
-                        })
-                    end
-                end)
-            end
-        end)
+        for k in pairs(o:GetAttributes()) do hook(k) end
+        cons[#cons+1] = o.AttributeChanged:Connect(hook)
     end
 
     o.Destroying:Once(function()
@@ -118,6 +135,7 @@ end
 
 function IF.Start(cb, opt)
     opt = opt or {}
+    opt.EventMask = opt.EventMask or { init=true, ancestry=true, parent=true, child=true, attr=true, destroy=true }
     local root: Instance = opt.Root or WorkspaceRoot
 
     local bag = {}
@@ -148,12 +166,8 @@ function IF.Start(cb, opt)
             table.clear(bag)
             table.clear(seen)
         end,
-        Pause = function()
-            run[1] = false
-        end,
-        Resume = function()
-            run[1] = true
-        end
+        Pause = function() run[1] = false end,
+        Resume = function() run[1] = true end
     }
 end
 
