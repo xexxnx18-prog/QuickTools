@@ -1,8 +1,110 @@
 --!strict
 --!native
 
+--[[
+IF 1.3.0.7.0 by xpria 
+â”œâ”€ fixed
+â”‚  â”œâ”€ actor root depth always returning 0 (breaking MaxDepth)
+â”‚  â”œâ”€ Watch using wrong root for actor children
+â”‚  â”œâ”€ childremove firing after destroy
+â”‚  â”œâ”€ resume causing duplicate watchers
+â”‚  â”œâ”€ eventmap leaking keys after destroy
+â”‚  â”œâ”€ debounce stamp shared across events
+â”‚  â”œâ”€ Describe recomputing HRP motion on init spam
+â”‚  â”œâ”€ Pass.Root logic failing for actor roots
+â”‚  â”œâ”€ Destroying not disconnecting actor child signals
+â”‚  â””â”€ stats.watched incrementing on rejected instances
+â””â”€ unchanged
+   â”œâ”€ actor executor usage (getactors / run_on_actor)
+   â”œâ”€ hrp motion math
+   â””â”€ public API
+]]
+--[[
+InstanceFinder (IF)
+â”œâ”€ version
+â”‚  â””â”€ 1.3.0.7.0
+â”‚
+â”œâ”€ overview
+â”‚  â”œâ”€ watches instances and emits lifecycle events
+â”‚  â”œâ”€ supports workspace roots and actor roots
+â”‚  â”œâ”€ actor-aware via getactors and run_on_actor
+â”‚  â””â”€ maintains per-instance event statistics
+â”‚
+â”œâ”€ start(cb, opt)
+â”‚  â”œâ”€ cb(ev, payload)
+â”‚  â”‚  â”œâ”€ ev : string
+â”‚  â”‚  â””â”€ payload : table
+â”‚  â”‚     â”œâ”€ self : Describe(instance)
+â”‚  â”‚     â”œâ”€ child : Describe(instance)?
+â”‚  â”‚     â”œâ”€ key : string?
+â”‚  â”‚     â””â”€ value : any?
+â”‚  â”‚
+â”‚  â””â”€ opt : table
+â”‚     â”œâ”€ Root : Instance?
+â”‚     â”‚  â”œâ”€ default : workspace
+â”‚     â”‚  â””â”€ can be Actor or any Instance
+â”‚     â”œâ”€ Scope : "Workspace"?
+â”‚     â”œâ”€ MaxDepth : number?
+â”‚     â”œâ”€ Throttle : number?
+â”‚     â”œâ”€ Debounce : number?
+â”‚     â”œâ”€ Actors : boolean?
+â”‚     â”‚  â”œâ”€ true  : include actors
+â”‚     â”‚  â””â”€ false : ignore actors
+â”‚     â”œâ”€ Classes : { [ClassName] = true }?
+â”‚     â”œâ”€ Names : { [Name] = true }?
+â”‚     â”œâ”€ Ignore : { [Instance] = true }?
+â”‚     â”œâ”€ Team : { [TeamName] = true }?
+â”‚     â”œâ”€ TeamBlacklist : { [TeamName] = true }?
+â”‚     â””â”€ EventMask : table?
+â”‚        â”œâ”€ init
+â”‚        â”œâ”€ ancestry
+â”‚        â”œâ”€ parent
+â”‚        â”œâ”€ child
+â”‚        â”œâ”€ childremove
+â”‚        â”œâ”€ attr
+â”‚        â””â”€ destroy
+â”‚
+â”œâ”€ return
+â”‚  â”œâ”€ Stop()
+â”‚  â”œâ”€ Pause()
+â”‚  â”œâ”€ Resume()
+â”‚  â”œâ”€ Stats()
+â”‚  â”‚  â”œâ”€ watched : number
+â”‚  â”‚  â””â”€ destroyed : number
+â”‚  â””â”€ Map()
+â”‚     â””â”€ { [instance] = { [event] = count } }
+â”‚
+â”œâ”€ events
+â”‚  â”œâ”€ init
+â”‚  â”œâ”€ ancestry
+â”‚  â”œâ”€ parent
+â”‚  â”œâ”€ child
+â”‚  â”œâ”€ childremove
+â”‚  â”œâ”€ attr
+â”‚  â””â”€ destroy
+â”‚
+â”œâ”€ payload.self (Describe)
+â”‚  â”œâ”€ instance : Instance
+â”‚  â”œâ”€ class : string
+â”‚  â”œâ”€ name : string
+â”‚  â”œâ”€ parent : Instance?
+â”‚  â”œâ”€ character : Model?
+â”‚  â”œâ”€ hrp : BasePart?
+â”‚  â”œâ”€ position : Vector3?
+â”‚  â”œâ”€ velocity : Vector3?
+â”‚  â”œâ”€ speed : number?
+â”‚  â”œâ”€ accel : Vector3?
+â”‚  â””â”€ attributes : table?
+â”‚
+â””â”€ actor behavior
+   â”œâ”€ actors treated as independent roots
+   â”œâ”€ children tracked via Actor signals
+   â”œâ”€ events bridged into actor thread
+   â””â”€ resume rebinds actor trees
+--]]
+
 local IF = {}
-IF.Version = "1.3.0.7.1"
+IF.Version = "1.3.0.7.0"
 
 local getactors = getactors or function() return {} end
 local run_on_actor = run_on_actor or function(_, fn, ...) return fn(...) end
@@ -28,70 +130,6 @@ local WorkspaceRoot: Workspace = S.workspace
 
 local motion = setmetatable({}, { __mode = "k" })
 local eventmap = setmetatable({}, { __mode = "k" })
-
-local scriptgraph = setmetatable({}, { __mode = "k" })
-
-local function scriptnode(scr)
-	local n = scriptgraph[scr]
-	if not n then
-		n = { requires = {}, fires = {}, listens = {}, creates = {}, mutates = {} }
-		scriptgraph[scr] = n
-	end
-	return n
-end
-
-local function currentscript()
-	return getcallingscript()
-end
-
-do
-	local oldrequire = require
-	require = function(m)
-		local src = currentscript()
-		if src then
-			scriptnode(src).requires[m] = true
-		end
-		return oldrequire(m)
-	end
-end
-
-do
-	local oldnc
-	oldnc = hookmetamethod(game, "__namecall", function(self, ...)
-		local m = getnamecallmethod()
-		local src = currentscript()
-		if src and m == "FireServer" and typeof(self) == "Instance" and self:IsA("RemoteEvent") then
-			scriptnode(src).fires[self] = true
-		end
-		return oldnc(self, ...)
-	end)
-end
-
-do
-	local oldconnect
-	oldconnect = hookfunction(Instance.new("BindableEvent").Event.Connect, function(sig, fn)
-		local src = currentscript()
-		if src then
-			local up = debug.getupvalue(fn, 1)
-			if typeof(up) == "Instance" then
-				scriptnode(src).listens[up] = true
-			end
-		end
-		return oldconnect(sig, fn)
-	end)
-end
-
-do
-	local oldnew = Instance.new
-	Instance.new = function(class, parent)
-		local obj = oldnew(class, parent)
-		local src = currentscript()
-		if src then
-			scriptnode(src).creates[obj] = true
-		end
-		return obj
-	end
-end
 
 local function isactor(o: Instance)
 	return o:IsA("Actor")
@@ -132,6 +170,7 @@ local function Describe(o: Instance)
 	local now = S.clock()
 	local m = hrp and StepHRP(hrp, now) or nil
 	local vel = m and m.v or nil
+	local spd = vel and vel.Magnitude or nil
 	return {
 		instance = o,
 		class = o.ClassName,
@@ -141,7 +180,7 @@ local function Describe(o: Instance)
 		hrp = hrp,
 		position = hrp and hrp.Position or nil,
 		velocity = vel,
-		speed = vel and vel.Magnitude or nil,
+		speed = spd,
 		accel = m and m.a or nil,
 		attributes = o.GetAttributes and o:GetAttributes() or nil
 	}
@@ -180,7 +219,7 @@ local function Pass(o: Instance, opt, root: Instance): boolean
 	return true
 end
 
-local function actorbridge(actor: Actor, ev)
+local function actorbridge(actor: Actor, ev, payload)
 	run_on_actor(actor, function(e)
 		if script and script.SetAttribute then
 			script:SetAttribute("__if_event", e)
@@ -200,10 +239,13 @@ local function Fire(cb, mask, ev, payload, stamp, debounce)
 	if selfd then
 		local key = selfd.character or selfd.hrp or selfd.instance
 		local m = eventmap[key]
-		if not m then m = {}; eventmap[key] = m end
+		if not m then
+			m = {}
+			eventmap[key] = m
+		end
 		m[ev] = (m[ev] or 0) + 1
 		if typeof(key) == "Instance" and isactor(key) then
-			actorbridge(key :: Actor, ev)
+			actorbridge(key :: Actor, ev, payload)
 		end
 	end
 	pcall(cb, ev, payload)
@@ -330,17 +372,6 @@ function IF.Start(cb, opt)
 			return eventmap
 		end
 	}
-end
-
-function IF.PrintTree()
-	for scr, node in scriptgraph do
-		print("Script:", scr)
-		for k in pairs(node.requires) do print("├─ requires:", k) end
-		for k in pairs(node.fires) do print("├─ fires:", k) end
-		for k in pairs(node.listens) do print("├─ listens:", k) end
-		for k in pairs(node.creates) do print("└─ creates:", k) end
-		print("")
-	end
 end
 
 return IF
