@@ -2,7 +2,7 @@
 --!native
 
 --[[
-IF 1.3.0.7.0
+IF 1.3.0.7.0 by xpria 
 ├─ fixed
 │  ├─ actor root depth always returning 0 (breaking MaxDepth)
 │  ├─ Watch using wrong root for actor children
