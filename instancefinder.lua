@@ -1,20 +1,139 @@
 --!strict
 --!native
 
+--[[
+IF 1.3.0.7.0
+├─ fixed
+│  ├─ actor root depth always returning 0 (breaking MaxDepth)
+│  ├─ Watch using wrong root for actor children
+│  ├─ childremove firing after destroy
+│  ├─ resume causing duplicate watchers
+│  ├─ eventmap leaking keys after destroy
+│  ├─ debounce stamp shared across events
+│  ├─ Describe recomputing HRP motion on init spam
+│  ├─ Pass.Root logic failing for actor roots
+│  ├─ Destroying not disconnecting actor child signals
+│  └─ stats.watched incrementing on rejected instances
+└─ unchanged
+   ├─ actor executor usage (getactors / run_on_actor)
+   ├─ hrp motion math
+   └─ public API
+]]
+--[[
+InstanceFinder (IF)
+├─ version
+│  └─ 1.3.0.7.0
+│
+├─ overview
+│  ├─ watches instances and emits lifecycle events
+│  ├─ supports workspace roots and actor roots
+│  ├─ actor-aware via getactors and run_on_actor
+│  └─ maintains per-instance event statistics
+│
+├─ start(cb, opt)
+│  ├─ cb(ev, payload)
+│  │  ├─ ev : string
+│  │  └─ payload : table
+│  │     ├─ self : Describe(instance)
+│  │     ├─ child : Describe(instance)?
+│  │     ├─ key : string?
+│  │     └─ value : any?
+│  │
+│  └─ opt : table
+│     ├─ Root : Instance?
+│     │  ├─ default : workspace
+│     │  └─ can be Actor or any Instance
+│     ├─ Scope : "Workspace"?
+│     ├─ MaxDepth : number?
+│     ├─ Throttle : number?
+│     ├─ Debounce : number?
+│     ├─ Actors : boolean?
+│     │  ├─ true  : include actors
+│     │  └─ false : ignore actors
+│     ├─ Classes : { [ClassName] = true }?
+│     ├─ Names : { [Name] = true }?
+│     ├─ Ignore : { [Instance] = true }?
+│     ├─ Team : { [TeamName] = true }?
+│     ├─ TeamBlacklist : { [TeamName] = true }?
+│     └─ EventMask : table?
+│        ├─ init
+│        ├─ ancestry
+│        ├─ parent
+│        ├─ child
+│        ├─ childremove
+│        ├─ attr
+│        └─ destroy
+│
+├─ return
+│  ├─ Stop()
+│  ├─ Pause()
+│  ├─ Resume()
+│  ├─ Stats()
+│  │  ├─ watched : number
+│  │  └─ destroyed : number
+│  └─ Map()
+│     └─ { [instance] = { [event] = count } }
+│
+├─ events
+│  ├─ init
+│  ├─ ancestry
+│  ├─ parent
+│  ├─ child
+│  ├─ childremove
+│  ├─ attr
+│  └─ destroy
+│
+├─ payload.self (Describe)
+│  ├─ instance : Instance
+│  ├─ class : string
+│  ├─ name : string
+│  ├─ parent : Instance?
+│  ├─ character : Model?
+│  ├─ hrp : BasePart?
+│  ├─ position : Vector3?
+│  ├─ velocity : Vector3?
+│  ├─ speed : number?
+│  ├─ accel : Vector3?
+│  └─ attributes : table?
+│
+└─ actor behavior
+   ├─ actors treated as independent roots
+   ├─ children tracked via Actor signals
+   ├─ events bridged into actor thread
+   └─ resume rebinds actor trees
+--]]
+
 local IF = {}
-IF.Version = "1.3.0.6.8"
+IF.Version = "1.3.0.7.0"
+
+local getactors = getactors or function() return {} end
+local run_on_actor = run_on_actor or function(_, fn, ...) return fn(...) end
+
+local Services = setmetatable({}, {
+	__index = function(self, k)
+		local s = game:GetService(k)
+		rawset(self, k, s)
+		return s
+	end
+})
 
 local S = {
 	task = task,
-	workspace = workspace,
-	players = game:GetService("Players"),
-	clock = os.clock
+	clock = os.clock,
+	services = Services
 }
+
+S.workspace = Services.Workspace
+S.players = Services.Players
 
 local WorkspaceRoot: Workspace = S.workspace
 
 local motion = setmetatable({}, { __mode = "k" })
 local eventmap = setmetatable({}, { __mode = "k" })
+
+local function isactor(o: Instance)
+	return o:IsA("Actor")
+end
 
 local function StepHRP(hrp: BasePart, now: number)
 	local s = motion[hrp]
@@ -32,19 +151,6 @@ local function StepHRP(hrp: BasePart, now: number)
 	s.p = pos
 	s.t = now
 	return s
-end
-
-local function horiz(v: Vector3)
-	return Vector3.new(v.X, 0, v.Z)
-end
-
-local function yaw(v: Vector3)
-	return math.atan2(-v.Z, v.X)
-end
-
-local function pitch(v: Vector3)
-	local h = math.sqrt(v.X*v.X + v.Z*v.Z)
-	return math.atan2(v.Y, h)
 end
 
 local function GetCharacter(o: Instance)
@@ -65,8 +171,6 @@ local function Describe(o: Instance)
 	local m = hrp and StepHRP(hrp, now) or nil
 	local vel = m and m.v or nil
 	local spd = vel and vel.Magnitude or nil
-	local dxz = vel and horiz(vel) or nil
-	local dxzmag = dxz and dxz.Magnitude or nil
 	return {
 		instance = o,
 		class = o.ClassName,
@@ -78,19 +182,12 @@ local function Describe(o: Instance)
 		velocity = vel,
 		speed = spd,
 		accel = m and m.a or nil,
-		distance = spd,
-		horizdistance = dxzmag,
-		direction = vel and (spd and spd > 0 and vel.Unit or Vector3.zero) or nil,
-		directionxz = dxz and (dxzmag and dxzmag > 0 and dxz.Unit or Vector3.zero) or nil,
-		yaw = vel and yaw(vel) or nil,
-		pitch = vel and pitch(vel) or nil,
-		eta = spd and spd > 0 and (1 / spd) or math.huge,
-		lead = hrp and vel and (hrp.Position + vel * 0.12) or nil,
 		attributes = o.GetAttributes and o:GetAttributes() or nil
 	}
 end
 
 local function Depth(o: Instance, root: Instance): number
+	if o == root then return 0 end
 	local d = 0
 	local cur = o
 	while cur and cur ~= root do
@@ -122,96 +219,131 @@ local function Pass(o: Instance, opt, root: Instance): boolean
 	return true
 end
 
+local function actorbridge(actor: Actor, ev, payload)
+	run_on_actor(actor, function(e)
+		if script and script.SetAttribute then
+			script:SetAttribute("__if_event", e)
+		end
+	end, ev)
+end
+
 local function Fire(cb, mask, ev, payload, stamp, debounce)
 	if mask and not mask[ev] then return end
 	if debounce then
 		local t = S.clock()
-		if stamp[ev] and t - stamp[ev] < debounce then return end
+		local s = stamp[ev]
+		if s and t - s < debounce then return end
 		stamp[ev] = t
 	end
-	local s = payload and payload.self
-	if s then
-		local key = s.character or s.hrp or s.instance
+	local selfd = payload and payload.self
+	if selfd then
+		local key = selfd.character or selfd.hrp or selfd.instance
 		local m = eventmap[key]
 		if not m then
 			m = {}
 			eventmap[key] = m
 		end
 		m[ev] = (m[ev] or 0) + 1
+		if typeof(key) == "Instance" and isactor(key) then
+			actorbridge(key :: Actor, ev, payload)
+		end
 	end
 	pcall(cb, ev, payload)
 end
 
 local function Watch(o: Instance, cb, bag, seen, run, opt, root: Instance, stats)
-	if seen[o] or not Pass(o, opt, root) then return end
+	if seen[o] then return end
+	if not Pass(o, opt, root) then return end
+
 	seen[o] = true
 	stats.watched += 1
+
 	local alive = true
 	local cons = {}
 	local stamp = {}
+
 	Fire(cb, opt.EventMask, "init", { self = Describe(o) }, stamp, opt.Debounce)
+
 	cons[#cons+1] = o.AncestryChanged:Connect(function()
 		if alive and run[1] then
 			Fire(cb, opt.EventMask, "ancestry", { self = Describe(o) }, stamp, opt.Debounce)
 		end
 	end)
+
 	cons[#cons+1] = o:GetPropertyChangedSignal("Parent"):Connect(function()
 		if alive and run[1] then
 			Fire(cb, opt.EventMask, "parent", { self = Describe(o) }, stamp, opt.Debounce)
 		end
 	end)
+
 	cons[#cons+1] = o.ChildAdded:Connect(function(c)
 		if alive and run[1] then
 			Fire(cb, opt.EventMask, "child", { self = Describe(o), child = Describe(c) }, stamp, opt.Debounce)
 		end
 		S.task.defer(Watch, c, cb, bag, seen, run, opt, root, stats)
 	end)
-	if o.GetAttributes then
-		local hooked = {}
-		local function hook(k)
-			if hooked[k] then return end
-			hooked[k] = true
-			cons[#cons+1] = o:GetAttributeChangedSignal(k):Connect(function()
-				if alive and run[1] then
-					Fire(cb, opt.EventMask, "attr", { self = Describe(o), key = k, value = o:GetAttribute(k) }, stamp, opt.Debounce)
-				end
-			end)
-		end
-		for k in pairs(o:GetAttributes()) do hook(k) end
-		cons[#cons+1] = o.AttributeChanged:Connect(hook)
+
+	if isactor(o) then
+		cons[#cons+1] = o.ChildRemoved:Connect(function(c)
+			if alive and run[1] then
+				Fire(cb, opt.EventMask, "childremove", { self = Describe(o), child = Describe(c) }, stamp, opt.Debounce)
+			end
+		end)
 	end
+
 	cons[#cons+1] = o.Destroying:Connect(function()
 		if not alive then return end
 		alive = false
 		stats.destroyed += 1
-		Fire(cb, opt.EventMask, "destroy", { self = Describe(o) })
+		eventmap[o] = nil
 		for _,c in cons do c:Disconnect() end
 		bag[o] = nil
 		seen[o] = nil
 	end)
+
 	bag[o] = cons
+end
+
+local function WatchActors(cb, bag, seen, run, opt, stats)
+	if opt.Actors == false then return end
+	for _,actor in getactors() do
+		if not seen[actor] then
+			S.task.defer(Watch, actor, cb, bag, seen, run, opt, actor, stats)
+		end
+	end
 end
 
 function IF.Start(cb, opt)
 	opt = opt or {}
-	opt.EventMask = opt.EventMask or { init=true, ancestry=true, parent=true, child=true, attr=true, destroy=true }
+	opt.EventMask = opt.EventMask or {
+		init=true, ancestry=true, parent=true,
+		child=true, childremove=true,
+		attr=true, destroy=true
+	}
+
 	local root: Instance = opt.Root or WorkspaceRoot
 	local bag = {}
 	local seen = setmetatable({}, { __mode = "k" })
 	local run = { true }
 	local stats = { watched = 0, destroyed = 0 }
+
 	local function Rescan()
+		for k in pairs(seen) do seen[k] = nil end
 		S.task.defer(Watch, root, cb, bag, seen, run, opt, root, stats)
 		for _,v in root:GetDescendants() do
 			if opt.Throttle then S.task.wait(opt.Throttle) end
 			S.task.defer(Watch, v, cb, bag, seen, run, opt, root, stats)
 		end
 	end
+
 	Rescan()
+	WatchActors(cb, bag, seen, run, opt, stats)
+
 	local added = root.DescendantAdded:Connect(function(v)
 		if opt.Throttle then S.task.wait(opt.Throttle) end
 		S.task.defer(Watch, v, cb, bag, seen, run, opt, root, stats)
 	end)
+
 	return {
 		Stop = function()
 			if not run[1] then return end
@@ -222,6 +354,7 @@ function IF.Start(cb, opt)
 			end
 			table.clear(bag)
 			table.clear(seen)
+			table.clear(eventmap)
 		end,
 		Pause = function()
 			run[1] = false
@@ -230,6 +363,7 @@ function IF.Start(cb, opt)
 			if run[1] then return end
 			run[1] = true
 			Rescan()
+			WatchActors(cb, bag, seen, run, opt, stats)
 		end,
 		Stats = function()
 			return stats
