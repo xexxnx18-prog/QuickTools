@@ -10,7 +10,7 @@ local function repo(name: string)
         return cache[name]
     end
 
-    local src = game:HttpGet(BASE .. name .. ".lua")
+    local src = game:HttpGet(BASE .. name .. ".luau")
     local mod = loadstring(src)()
     cache[name] = mod
     return mod
