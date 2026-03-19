@@ -1,5 +1,6 @@
 --!strict
 --!native
+-- Made it By xnx and ChatGPT 
 -- Probably This Dex Lite I'm not sure...
 local IF = {}
 IF.Version = "1.3.0.7.2-debug"
